@@ -14,7 +14,7 @@
     "vitest": "^3.0.9"
   },
   "scripts": {
-    "fl:pack": "pnpm -r --filter \"!./examples/*\" --filter \"!./examples/**/*\" --filter \"!./docs/\" exec pnpm pack --pack-destination=c:/frontleap/mastra-app/packages",
+    "fl:pack": "pnpm -r --filter \"!./examples/*\" --filter \"!./examples/**/*\" --filter \"!./docs/\" exec pnpm pack --pack-destination=c:/frontleap/frontleap-core/apps/mastra-ai/packages",
     "fl:lint": "pnpm turbo --filter \"!./examples/**/*\" --filter \"!./docs/**/*\" --filter \"!./integrations/**/*\" --filter \"!@mastra/playground\" lint",
     "ci:publish": "pnpm publish -r",
     "build": "pnpm turbo build --filter \"!./examples/*\" --filter \"!./examples/**/*\" --filter \"!./docs/\"",
