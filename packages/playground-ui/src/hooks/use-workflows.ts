@@ -323,6 +323,7 @@ export const useWatchWorkflow = (baseUrl: string) => {
 
       throw error;
     } finally {
+      console.log('Stop watching workflow');
       setIsWatchingVNextWorkflow(false);
     }
   };
