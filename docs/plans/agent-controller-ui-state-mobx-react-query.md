@@ -1,42 +1,63 @@
 # Agent Controller UI State Plan (MobX + React Query)
 
-Status: planning draft  
-Audience: teams building a **custom** Agent Controller UI (inspired by Factory, not importing Factory UI)  
-Stack: `@mastra/client-js` + MobX + React Query
+Status: planning draft — **portable** (copy into any app)  
+Audience: a **standalone React app** that talks to a Mastra server’s Agent Controller  
+Stack in the app: `@mastra/client-js` + MobX + React Query  
+Does **not** depend on Factory, Studio, or any Mastra UI package
+
+## 0. How to use this plan in another app
+
+1. Copy this document into your app repo (or keep it as an implementation checklist).
+2. Install only: `@mastra/client-js` (and optionally type imports from `@mastra/core` if you need shared message/event types).
+3. Point `MastraClient` at your Mastra server base URL (the server that registered the Agent Controller).
+4. Implement stores/hooks in **your** app. Nothing here is published as a Mastra package.
+5. Treat public client methods + SSE events + `display_state_changed` as the contract. Ignore any Mastra-internal UI code.
+
+```ts
+import { MastraClient } from '@mastra/client-js'
+
+const client = new MastraClient({ baseUrl: process.env.MASTRA_API_URL! })
+const controller = client.getAgentController('your-controller-id')
+const session = controller.session(resourceId /* e.g. userId */, scope? /* optional */)
+await session.create({ threadId? })
+await session.subscribe({ onEvent, onReconnect? })
+```
+
+Your app owns: routing, auth headers, MobX stores, React Query cache, and all UI components.
 
 ## 1. Goal and non-goals
 
 ### Goal
 
-Drive an Agent Controller session from your own React UI and store so **every Agent Controller client capability is ready to use in the UI**, including:
+In **your** app, drive an Agent Controller session so **every Agent Controller client capability is ready to use in the UI**, including:
 
 - Consistent transcript on **cold load / page refresh**
 - Live **streaming** without flicker or duplicates
 - Safe **thread switches** and **load-older** history
 - Running work visibility (tasks, tools, subagents, active runs)
 - HITL (approvals, suspensions), modes/models, permissions, OM, goals, workspace, notifications
-- Clear extension points for product logic
+- Clear extension points for **your** product logic
 
 “Feature ready” means: for each public `@mastra/client-js` Agent Controller method and each known event / display-state field, the UI has a MobX or React Query owner, a cold-load path, a live path, and a visible control or status surface (even if some surfaces start minimal).
 
 ### Non-goals
 
-- Replacing Mastra Factory UI
+- Depending on Factory, Studio, playground, or any Mastra-internal UI
 - Using `@mastra/react` `useChat` (plain-agent stream API, not controller sessions)
-- Publishing a new Mastra UI-state package in this pass
-- Importing `@internal/factory-ui` (private; use as a pattern reference only)
-- Building Factory product surfaces (board, work items, GitHub sync) — only Agent Controller chat/session features
+- Waiting for Mastra to publish an official MobX/RQ Agent Controller UI kit
+- Building non-controller product features (boards, CRM, etc.) inside this plan — only the Agent Controller session/chat surface
 
-## 2. What Mastra provides (reuse)
+## 2. What Mastra provides (reuse from npm)
 
 | Layer | Package / API | Reuse as |
 | --- | --- | --- |
-| Runtime | `@mastra/core/agent-controller` | Server session host |
-| HTTP + SSE client | `@mastra/client-js` `AgentControllerSession` | Transport only |
-| Typed events | `AgentControllerEvent`, `isKnownAgentControllerEvent` | Event narrowing |
-| Reduced live chrome snapshot | `display_state_changed` / `AgentControllerDisplayState` | Running flag, current stream message, tools, approvals, OM, usage |
-| Message types | `MastraDBMessage` | Transcript row payload |
-| Pattern reference | Factory UI (internal) | Copy merge/connection patterns |
+| HTTP + SSE client | `@mastra/client-js` `MastraClient` / `AgentController` / `AgentControllerSession` | **Only** transport your app needs |
+| Typed events | `AgentControllerEvent`, `isKnownAgentControllerEvent` | Event narrowing in your applicator |
+| Reduced live chrome snapshot | `display_state_changed` / `AgentControllerDisplayState` | Running flag, tools, approvals, OM, usage |
+| Message types | `MastraDBMessage` (from client/core types) | Transcript row payload |
+| Server runtime | Your Mastra deployment with an Agent Controller registered | Backend you already host |
+
+You do **not** need Factory (or any other Mastra frontend) to implement this.
 
 ### Client surface to cover (complete)
 
@@ -73,19 +94,20 @@ Full feature ownership, cold vs live paths, and UI surfaces are in **§11**.
 2. **`display_state_changed` is a chrome/snapshot channel**, not a full transcript rebuild. It carries `isRunning`, `currentMessage`, tools, approvals, suspensions, OM, token usage, etc.
 3. **Durable transcript truth for a cold page** is storage via `listMessages`. Live truth mid-session is your in-memory transcript store updated by `message_*` / tool events, periodically reconciled with `listMessages`.
 
-## 3. What Mastra does not provide
+## 3. What Mastra does not provide (you build in your app)
 
 - No public MobX / Zustand / Redux store for Agent Controller
 - No public React hooks for controller transcript/thread UI
-- No cursor-based message pagination API today — Factory grows a `limit` window (`100 → 200 → …`)
+- No cursor-based message pagination API today — grow a `limit` window (`100 → 200 → …`) via `listMessages(threadId, limit)`
+- No React components for composer, transcript, HITL cards, task panel, etc. — all yours
 
-## 4. Ownership split
+## 4. Ownership split (inside your app)
 
 ```mermaid
 flowchart LR
-  UI[React_UI] --> MobX[MobX_stores]
-  UI --> RQ[React_Query]
-  MobX --> Client["AgentControllerSession"]
+  UI[Your_React_UI] --> MobX[Your_MobX_stores]
+  UI --> RQ[Your_React_Query]
+  MobX --> Client["@mastra/client-js Session"]
   RQ --> Client
   Client --> SSE[SSE_subscribe]
   Client --> HTTP[REST_reads_writes]
@@ -94,14 +116,14 @@ flowchart LR
   MobX -->|"invalidate_or_seed"| RQ
 ```
 
-| Concern | Owner | Why |
+| Concern | Owner in your app | Why |
 | --- | --- | --- |
 | Threads, modes, models, permissions, settings | React Query | Cacheable GETs, refetch, invalidation |
 | Message history windows (`listMessages`) | React Query | Durable snapshot; remount/refresh friendly |
 | SSE connection lifecycle | MobX `SessionStore` | Long-lived; not request/response |
 | Active thread id, optimistic sends | MobX `ChatStore` | Ephemeral UI intent |
 | Live transcript entries + stream flags | MobX `ChatStore` | High-churn event fold |
-| Product/domain logic | MobX domain actions | Extend without forking the applicator |
+| Your product logic | MobX domain actions | Extend without forking the applicator |
 
 **Hard rule:** React Query never owns the live stream. MobX never treats server lists as source of truth without a fetch.
 
@@ -118,10 +140,10 @@ flowchart LR
 | `WorkspaceStore` | workspace readiness / errors |
 | Domain stores | product-only observers/actions |
 
-### React Query keys (Factory-inspired)
+### React Query keys (suggested)
 
 ```
-['agent-controller', controllerId]                          // listAgentControllers sibling
+['agent-controller', controllerId]
 ['agent-controller', controllerId, 'modes' | 'models' | 'workspace' | 'active-runs']
 ['agent-controller', controllerId, 'sessions', resourceId, scope, 'state']
 ['agent-controller', ..., 'threads']
@@ -134,7 +156,7 @@ Suggested defaults:
 - `INITIAL_THREAD_MESSAGE_LIMIT = 100`
 - `LOAD_MORE_STEP = 100`
 - Messages query: `staleTime: 0`, `refetchOnMount: 'always'`, no focus refetch
-- `placeholderData`: keep previous **only when the thread key prefix matches** (load-more must not flash empty; thread switch must not bleed)
+- `placeholderData`: keep previous **only when the thread key prefix matches**
 
 ## 6. Transcript model (MobX)
 
@@ -155,7 +177,7 @@ Each entry roughly:
 | `listMessages` → `mergeWindow` | Seed / heal / prepend older history | Continuous token streaming |
 | SSE `message_*` / tool_* / approval_* | Live upserts, streaming flags, tool cards | Full historical backfill |
 
-`display_state_changed` updates **chrome** (`isRunning`, OM, usage, pending approval UI). Optionally mirror `currentMessage` into the streaming assistant entry, but Factory’s durable bubble list is driven by `message_*`, not by replacing the whole list from display state.
+`display_state_changed` updates **chrome** (`isRunning`, OM, usage, pending approval UI). Optionally mirror `currentMessage` into the streaming assistant entry. Keep the durable bubble list driven by `message_*` + `listMessages`/`mergeWindow` — do not rebuild the whole transcript from display state.
 
 ## 7. Consistency core: history ↔ streaming (detailed)
 
@@ -191,7 +213,7 @@ Properties `mergeWindow` must guarantee:
 
 ### 7.2 Claim / match rules (order matters)
 
-When merging a server message into on-screen entries, claim in this order (Factory-style):
+When merging a server message into on-screen entries, claim in this order:
 
 1. Exact message `id`
 2. Shared `toolCallId` on tool parts (assistant identity rotation mid-tool)
@@ -212,7 +234,7 @@ If no claim: insert as a new entry at the correct chronological anchor.
 
 ### 7.4 Who writes the streaming assistant bubble?
 
-**Recommended split (matches Factory + controller display state):**
+**Recommended split:**
 
 | UI surface | Source |
 | --- | --- |
@@ -372,21 +394,19 @@ Wrap writes:
 
 Put product side effects **after** session calls or inside observers of ChatStore fields (`isRunning`, approvals, tasks). Do not fork `mergeWindow` for analytics.
 
-## 10. Factory reference map (inspiration only)
+## 10. Public docs / contract (no Mastra UI dependency)
 
-Internal paths to read when implementing (do not import the package):
+Use only published Mastra docs + `@mastra/client-js` types while implementing in your app:
 
-- Connection: `mastracode/factory-ui/src/ui/domains/chat/hooks/useAgentControllerConnection.ts`
-- Transcript reducer / `mergeWindow`: `mastracode/factory-ui/src/ui/domains/chat/services/transcript.ts`
-- Transcript hook + `initialHistoryReady`: `.../hooks/useAgentControllerTranscript.ts`
-- RQ window: `mastracode/factory-ui/src/hooks/useAgentControllerThreadMessages.ts`
-- Provider wiring: `.../context/ChatTranscriptProvider.tsx`
-- Session sync / reconnect poll: `.../hooks/useAgentControllerSessionSync.ts`
-- Docs: Agent Controller “Connect a UI” (`display_state_changed`, `session.displayState.get()`)
+- Agent Controller overview / “Connect a UI” (session subscribe, `display_state_changed`)
+- Client SDK reference for `AgentController` / `AgentControllerSession`
+- This plan’s §2 method table + §11 checklist as your implementation backlog
+
+Optional: if you still have access to the Mastra monorepo, you may skim internal chat UI code for ideas — **never import it**. Your app must compile and run with only npm packages.
 
 ## 11. Feature-complete UI checklist
 
-Everything below is required for “all Agent Controller features ready in the UI.” Factory covers many of these; a custom UI should cover **all** client methods, not only what Factory uses.
+Everything below is required for “all Agent Controller features ready in **your** UI.” Cover **every** public client method — not a subset.
 
 ### 11.1 Store ownership (extend §5)
 
@@ -532,13 +552,15 @@ Minimum UI effect per family:
 - `workspace_*` / `info` / `error` / `notification*` → banners/toasts
 - `state_changed` → optional custom kv mirror
 
-### 11.15 Factory gap list (implement these even if Factory skips them)
+### 11.15 Easy-to-miss APIs (still required for full coverage)
+
+These are easy to skip when building a minimal chat — include them for feature completeness:
 
 1. Dedicated `steer()` vs send-while-busy
-2. `listModels` from controller (not only external packs)
+2. `listModels` from the controller catalog
 3. `workspaceStatus`
-4. Thread rename / delete / clone via AC APIs
-5. `getGoal` cold-load + judge/maxRuns options
+4. Thread rename / delete / clone
+5. `getGoal` on cold load + judge/maxRuns options
 6. `getOMRecord` detail view
 7. `sendNotification` producer
 8. `setPermissionForTool`
@@ -611,10 +633,12 @@ Integration (MSW):
 - Growing `limit` refetch gets more expensive on very long threads; virtualize the list when you exceed one window.
 - Missing `threadGeneration` will cause the most visible consistency bugs (wrong thread’s history landing after a fast switch).
 - Feature-complete UI is large; ship Phase A–B before polish so runs never wedge on missing HITL.
-- Factory is an incomplete map of the client — do not treat “Factory doesn’t show X” as “X is optional.”
+- Method names in this plan are conceptual — verify against your installed `@mastra/client-js` typings when implementing.
 
 ## 15. Summary
 
+This plan is for a **standalone app**: depend only on `@mastra/client-js` (+ your MobX/RQ/UI). Copy the checklist into your repo and implement against the public client.
+
 Use **React Query for durable reads**, **MobX for live transcript + display state + connection**, and a disciplined **`mergeWindow`** so refresh, streaming, reconnect, and load-older converge.
 
-For **feature completeness**, expose every `@mastra/client-js` Agent Controller method through stores/actions, bind the full display-state snapshot for chrome/running work, handle every known SSE event in one applicator, and always re-hydrate with `state()` + `listMessages` after reconnect. Prefer **`message_*` for bubbles** and **`display_state_changed` for chrome/tasks/HITL/subagents**. Treat Factory as inspiration, not the ceiling.
+For **feature completeness**, expose every Agent Controller client method through stores/actions, bind the full display-state snapshot for chrome/running work, handle every known SSE event in one applicator, and always re-hydrate with `state()` + `listMessages` after reconnect. Prefer **`message_*` for bubbles** and **`display_state_changed` for chrome/tasks/HITL/subagents**.
