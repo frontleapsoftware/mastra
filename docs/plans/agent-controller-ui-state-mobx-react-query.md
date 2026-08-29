@@ -8,12 +8,16 @@ Stack: `@mastra/client-js` + MobX + React Query
 
 ### Goal
 
-Drive an Agent Controller session from your own React UI and store with:
+Drive an Agent Controller session from your own React UI and store so **every Agent Controller client capability is ready to use in the UI**, including:
 
 - Consistent transcript on **cold load / page refresh**
-- Live **streaming** updates without flicker or duplicates
+- Live **streaming** without flicker or duplicates
 - Safe **thread switches** and **load-older** history
+- Running work visibility (tasks, tools, subagents, active runs)
+- HITL (approvals, suspensions), modes/models, permissions, OM, goals, workspace, notifications
 - Clear extension points for product logic
+
+“Feature ready” means: for each public `@mastra/client-js` Agent Controller method and each known event / display-state field, the UI has a MobX or React Query owner, a cold-load path, a live path, and a visible control or status surface (even if some surfaces start minimal).
 
 ### Non-goals
 
@@ -21,6 +25,7 @@ Drive an Agent Controller session from your own React UI and store with:
 - Using `@mastra/react` `useChat` (plain-agent stream API, not controller sessions)
 - Publishing a new Mastra UI-state package in this pass
 - Importing `@internal/factory-ui` (private; use as a pattern reference only)
+- Building Factory product surfaces (board, work items, GitHub sync) — only Agent Controller chat/session features
 
 ## 2. What Mastra provides (reuse)
 
@@ -33,19 +38,34 @@ Drive an Agent Controller session from your own React UI and store with:
 | Message types | `MastraDBMessage` | Transcript row payload |
 | Pattern reference | Factory UI (internal) | Copy merge/connection patterns |
 
-### Session methods you will call
+### Client surface to cover (complete)
 
-From `@mastra/client-js` `AgentControllerSession`:
+**Controller** (`client.getAgentController(id)`):
 
 | Method | Role |
 | --- | --- |
-| `subscribe({ onEvent, onConnectionChange? })` | Live SSE events |
-| `sendMessage(...)` | User turns / steers |
-| `switchThread(threadId)` | Bind session to a thread |
-| `createThread(title?)` | New thread |
-| `listThreads(...)` | Sidebar list |
-| `listMessages(threadId, limit?)` | Newest-N history window |
-| abort / approve / resume APIs | HITL controls |
+| `listModes` | Mode catalog |
+| `listModels` | Model catalog (`hasApiKey`, use counts) |
+| `listActiveRuns` | Cross-resource busy map |
+| `workspaceStatus` | Sandbox / workspace readiness |
+| `session(resourceId, scope?)` | Session handle |
+
+Also: `client.listAgentControllers()` when hosting more than one controller.
+
+**Session** (`controller.session(...)`) — every public method must have a store action + UI affordance:
+
+| Area | Methods |
+| --- | --- |
+| Lifecycle | `create`, `subscribe` (+ reconnect/`onReconnect`), `state`, `setState`, `setResourceId`, `getResourceIds` |
+| Messaging | `sendMessage` (text or `{ content, files? }`), `steer`, `followUp`, `abort` |
+| HITL | `approveTool`, `respondToToolSuspension` |
+| Mode / model | `switchMode`, `switchModel({ scope?, modeId? })` |
+| Threads | `listThreads`, `switchThread`, `createThread`, `renameThread`, `deleteThread`, `cloneThread`, `listMessages` |
+| OM / goals | `getOMRecord`, `getGoal`, `setGoal`, `updateGoal`, `clearGoal` |
+| Permissions | `getPermissions`, `setPermissionForCategory`, `setPermissionForTool` |
+| Signals | `sendNotification` |
+
+Full feature ownership, cold vs live paths, and UI surfaces are in **§11**.
 
 ### Important server facts
 
@@ -87,30 +107,26 @@ flowchart LR
 
 ## 5. Store and query map
 
-### MobX `SessionStore`
+### MobX stores
 
-- `controllerId`, `resourceId`, optional scope/tags
-- Connection: `connecting | ready | reconnecting | error`
-- Subscription handle + reconnect policy
-- Last known server session metadata (`isRunning`, mode, model) mirrored from events / state sync
-
-### MobX `ChatStore`
-
-- `activeThreadId`
-- `historyEpoch` / `threadGeneration` (monotonic; ignore stale async results)
-- `initialHistoryReady: boolean`
-- `entries: TranscriptEntry[]` (committed + streaming + optimistic)
-- `displayState: AgentControllerDisplayState | null` (chrome)
-- `pendingLocalIds: Set<string>` (optimistic user rows)
-- Actions: `resetThread`, `mergeWindow`, `applyEvent`, `addOptimisticUser`, `failOptimisticUser`, `markHistoryReady`
+| Store | Owns |
+| --- | --- |
+| `SessionStore` | `controllerId`, `resourceId`, scope/tags, connection status, subscription, reconnect, `create`/`state`/`setState` |
+| `ChatStore` | `activeThreadId`, `threadGeneration`, `initialHistoryReady`, transcript `entries`, optimistic locals, full `displayState`, HITL cards, follow-up queue; actions `mergeWindow` / `applyEvent` / send helpers |
+| `GoalStore` | goal record + `goal_evaluation` |
+| `OMStore` | OM chrome from display state + optional `getOMRecord` detail |
+| `WorkspaceStore` | workspace readiness / errors |
+| Domain stores | product-only observers/actions |
 
 ### React Query keys (Factory-inspired)
 
 ```
-['agent-controller', controllerId, 'sessions', resourceId, scope, 'threads']
+['agent-controller', controllerId]                          // listAgentControllers sibling
+['agent-controller', controllerId, 'modes' | 'models' | 'workspace' | 'active-runs']
+['agent-controller', controllerId, 'sessions', resourceId, scope, 'state']
+['agent-controller', ..., 'threads']
 ['agent-controller', ..., 'threads', threadId, 'messages', limit]
-['agent-controller', ..., 'modes' | 'settings' | 'permissions']
-['agent-controller', ..., 'connection-state']  // optional mirrored running/tasks
+['agent-controller', ..., 'permissions' | 'goal' | 'om-record' | 'settings']
 ```
 
 Suggested defaults:
@@ -368,18 +384,203 @@ Internal paths to read when implementing (do not import the package):
 - Session sync / reconnect poll: `.../hooks/useAgentControllerSessionSync.ts`
 - Docs: Agent Controller “Connect a UI” (`display_state_changed`, `session.displayState.get()`)
 
-## 11. Build order
+## 11. Feature-complete UI checklist
 
-1. `SessionStore` + subscribe / reconnect
+Everything below is required for “all Agent Controller features ready in the UI.” Factory covers many of these; a custom UI should cover **all** client methods, not only what Factory uses.
+
+### 11.1 Store ownership (extend §5)
+
+| Store / query | Owns |
+| --- | --- |
+| `SessionStore` | connection, subscribe/reconnect, `create`, `state`, `setState`, scope/resourceId |
+| `ChatStore` | transcript entries, optimistic sends, `displayState`, tasks, HITL prompts, follow-up queue |
+| `ThreadsStore` + RQ | list/create/switch/rename/delete/clone threads; message windows |
+| `CatalogStore` + RQ | `listModes`, `listModels`, `listAgentControllers` |
+| `PermissionsStore` + RQ | category + per-tool policies |
+| `GoalStore` | get/set/update/clear goal + live `goal_evaluation` |
+| `OMStore` | `omProgress` chrome + optional `getOMRecord` detail |
+| `ActivityStore` + RQ | `listActiveRuns` poll + live `isRunning` patches |
+| `WorkspaceStore` + RQ | `workspaceStatus` + workspace_* events |
+| Domain stores | product-only; observe the above |
+
+### 11.2 Session lifecycle
+
+| Feature | API | Live | Cold / refresh | UI surface |
+| --- | --- | --- | --- | --- |
+| Discover controllers | `listAgentControllers` | — | RQ | Controller picker (if multi) |
+| Bind session | `session(resourceId, scope?)` | — | mount | implicit |
+| Create / resume | `create({ threadId?, tags? })` | — | mount | splash / binding |
+| Hydrate | `state({ threadId? })` | onReconnect | mount | seed mode/model/running/tasks/settings/OM summary |
+| Mutate session kv | `setState` | — | settings saves | settings form |
+| SSE | `subscribe` + SDK `reconnect` / `onReconnect` | yes | — | connection chip |
+| Rebind resource | `setResourceId` / `getResourceIds` | — | rare | admin / migration (expose actions even if hidden) |
+
+**Must:** on every reconnect → `state()` + refetch messages + `mergeWindow` (SSE never replays).
+
+### 11.3 Messaging and run control
+
+| Feature | API | Events / DS | UI |
+| --- | --- | --- | --- |
+| Send | `sendMessage(text \| { content, files? })` | `message_*`, `agent_*` | composer + attachments |
+| Steer (interrupt) | `steer` | same | composer while running (distinct from send) |
+| Follow-up queue | `followUp` | `follow_up_queued`, `displayState.queuedFollowUps` | queue badge + “send after” |
+| Abort | `abort` | `agent_end` | Stop button |
+| Optimistic user | local then reconcile | claim in `mergeWindow` | pending/failed ticks |
+
+### 11.4 Transcript + history (see §7)
+
+Already specified: `listMessages`, `mergeWindow`, `message_*`, `initialHistoryReady`, load-older, reconnect heal.
+
+### 11.5 HITL (blocking)
+
+| Feature | API | Events / DS | Cold | UI |
+| --- | --- | --- | --- | --- |
+| Tool approval | `approveTool(id, approved)` | `tool_approval_required`, `displayState.pendingApproval` | re-subscribe + DS / message metadata | Approve / Deny card |
+| ask_user | `respondToToolSuspension` | `tool_suspended` | message `suspendedTools` metadata | prompt card |
+| request_access | same | same | same | Yes / No |
+| submit_plan | same (`PlanResume`) | same | same | plan review card |
+| Cancelled | — | `tool_suspension_cancelled` | — | dismiss card |
+
+Without these controls, runs stay stuck forever.
+
+### 11.6 Threads
+
+| Feature | API | Events | UI |
+| --- | --- | --- | --- |
+| List | `listThreads({ limit?, tags? })` | `thread_*` invalidate | sidebar |
+| Switch | `switchThread` | `thread_changed` | route + generation token |
+| Create | `createThread` | `thread_created` | New chat |
+| Rename | `renameThread` | `thread_title_updated`, `om_thread_title_updated` | inline title |
+| Delete | `deleteThread` | `thread_deleted` | menu |
+| Clone | `cloneThread` | — | menu |
+
+### 11.7 Modes and models
+
+| Feature | API | Events | UI |
+| --- | --- | --- | --- |
+| List modes | `listModes` | — | mode switcher |
+| Switch mode | `switchMode` | `mode_changed` | same |
+| List models | `listModels` | — | model switcher (use controller catalog, not only custom packs) |
+| Switch model | `switchModel(id, { scope?, modeId? })` | `model_changed` | support thread + global (+ mode-scoped if you use it) |
+
+### 11.8 Permissions and settings
+
+| Feature | API | UI |
+| --- | --- | --- |
+| Load rules | `getPermissions` | settings |
+| Category policy | `setPermissionForCategory` | YOLO / category toggles |
+| Per-tool policy | `setPermissionForTool` | advanced tool matrix |
+| Settings blob | `state.settings` / `setState` | notifications, thinkingLevel, smartEditing, etc. |
+
+### 11.9 Running work (tasks / tools / subagents / active runs)
+
+| Feature | API / events / DS | Cold | UI |
+| --- | --- | --- | --- |
+| Task list | `task_updated`, `displayState.tasks`, `state().tasks` | `state().tasks` | Task panel (hide when all completed) |
+| Active tools | `tool_*`, `displayState.activeTools`, input buffers | DS after subscribe | tool chips / cards |
+| Subagents | `subagent_*`, `displayState.activeSubagents` | DS | nested agent cards (include text/tool deltas) |
+| Busy | `isRunning` / `agent_start|end` | `state().running` | Stop + spinners |
+| Cross-session busy | `listActiveRuns` (poll ~5s) | poll | sidebar dots on other resources |
+| Modified files | `displayState.modifiedFiles` | DS | optional diff strip |
+| Harness `background-task-*` chunks | not first-class AC UI events | — | prefer tools/subagents/tasks/activeRuns unless you enable harness BG tasks and need per-taskId progress |
+
+### 11.10 Observational memory
+
+| Feature | API / events / DS | UI |
+| --- | --- | --- |
+| Budgets / phase | `displayState.omProgress`, om_* events, state OM summary | status line |
+| Full record | `getOMRecord` | OM inspector / debug drawer |
+| Model / activation | `om_model_changed`, `om_activation`, `om_status` | advanced OM UI |
+
+### 11.11 Goals
+
+| Feature | API / events | Cold | UI |
+| --- | --- | --- | --- |
+| CRUD | `getGoal`, `setGoal`, `updateGoal`, `clearGoal` | **must** `getGoal` on mount | Goal panel |
+| Progress | `goal_evaluation` | — | progress / pause / resume |
+| Options | judgeModelId, maxRuns on set/update | — | goal settings |
+
+### 11.12 Workspace and notifications
+
+| Feature | API / events | UI |
+| --- | --- | --- |
+| Workspace status | `workspaceStatus`, `workspace_ready|error|status_changed` | readiness banner |
+| Inbound notices | `notification`, `notification_summary`, `info`, `error` | toast / transcript notices |
+| Outbound signal | `sendNotification` | system/integration actions (expose even if rare) |
+
+### 11.13 Display-state contract (bind all fields)
+
+Consume full `display_state_changed` into MobX (Maps → plain objects on the wire):
+
+`isRunning`, `currentMessage`, `queuedFollowUps`, `tokenUsage`, `activeTools`, `toolInputBuffers`, `pendingApproval`, `pendingSuspensions`, `activeSubagents`, `omProgress`, `bufferingMessages`, `bufferingObservations`, `modifiedFiles`, `tasks`, `previousTasks`
+
+Chrome and panels read this snapshot; transcript bubbles still prefer `message_*` + `mergeWindow` (§7).
+
+### 11.14 Event applicator coverage
+
+`applyControllerEvent` must handle every known `AgentControllerEvent` type (see client `KNOWN_AGENT_CONTROLLER_EVENT_TYPES`). Unknown types: log + ignore, do not crash.
+
+Minimum UI effect per family:
+
+- `message_*` / `tool_*` / `shell_output` / `command_exit` → transcript
+- `tool_approval_*` / `tool_suspended*` → HITL cards
+- `thread_*` / `mode_changed` / `model_changed` → invalidate RQ + local labels
+- `task_updated` / `goal_evaluation` / `follow_up_queued` → panels
+- `subagent_*` → nested cards
+- `display_state_changed` / `usage_update` → chrome
+- `om_*` → OM chrome
+- `workspace_*` / `info` / `error` / `notification*` → banners/toasts
+- `state_changed` → optional custom kv mirror
+
+### 11.15 Factory gap list (implement these even if Factory skips them)
+
+1. Dedicated `steer()` vs send-while-busy
+2. `listModels` from controller (not only external packs)
+3. `workspaceStatus`
+4. Thread rename / delete / clone via AC APIs
+5. `getGoal` cold-load + judge/maxRuns options
+6. `getOMRecord` detail view
+7. `sendNotification` producer
+8. `setPermissionForTool`
+9. `setResourceId` / `getResourceIds`
+10. `listAgentControllers` when multi-controller
+11. Full display-state Maps on reconnect (HITL/tools/subagents)
+12. Subagent text/tool deltas; `tool_suspension_cancelled`; title events; richer OM events
+13. Prefer SDK `subscribe` reconnect helpers **or** equivalent re-sync (document which)
+
+## 12. Build order (feature-complete)
+
+### Phase A — spine (blocks everything)
+
+1. `SessionStore` + `create` + `state` + `subscribe` + reconnect re-sync
 2. RQ threads + `switchThread` + windowed `listMessages` → `mergeWindow` + `initialHistoryReady`
-3. `message_*` applicator for live streaming upserts
-4. `display_state_changed` → chrome
-5. Optimistic send / abort / approvals
-6. Reconnect refetch + `mergeWindow` heal
-7. Load-older merge + scroll preserve
-8. Domain actions on the same spine
+3. `message_*` streaming upserts + optimistic send + abort
+4. Full `display_state_changed` → MobX chrome
 
-## 12. Testing matrix (minimum)
+### Phase B — stay unstuck / operable
+
+5. HITL: approval + all suspension kinds + cancel event
+6. Modes + models (controller catalogs) + switch APIs
+7. Permissions (category + per-tool) + settings via `setState`
+8. Tasks panel + active tools/subagents chrome + `listActiveRuns`
+
+### Phase C — full controller surface
+
+9. Thread rename / delete / clone + title events
+10. Follow-up queue UI + dedicated `steer`
+11. Goals CRUD + cold `getGoal` + `goal_evaluation`
+12. OM status + `getOMRecord` drawer
+13. Workspace status + notification inbound/outbound
+14. Attachments on `sendMessage`, modified-files strip, usage line
+15. Multi-controller discover / resource rebind if needed
+
+### Phase D — harden
+
+16. Load-older + virtualized transcript
+17. Event fixture tests for every known event type
+18. Domain product actions on the same spine
+
+## 13. Testing matrix (minimum)
 
 Unit-test `mergeWindow` / `applyEvent` with fixtures:
 
@@ -391,19 +592,29 @@ Unit-test `mergeWindow` / `applyEvent` with fixtures:
 6. Load-more prepend preserves streaming tail
 7. Tool terminal on server heals stuck `call` part; never regresses terminal → call
 8. Empty server window does not wipe live entries
+9. Each known event type updates the expected store slice without throwing
+10. Reconnect: pending approval/suspension restored from display state / message metadata
+11. `state().tasks` + later `task_updated` converge on one task list
+12. `listActiveRuns` poll marks foreign resources busy without touching local transcript
 
 Integration (MSW):
 
 - Refresh while `isRunning: true` + mid-thread messages → busy chrome + continued `message_update`
 - Reconnect invalidates messages and heals without clearing UI
+- Approval / ask_user / submit_plan round-trips unblock the run
+- Mode/model/thread/goal/permission mutations reflect in UI after events or refetch
 
-## 13. Risks
+## 14. Risks
 
 - Controller event shapes are still evolving (beta) — keep the applicator thin and tested.
 - `AgentControllerDisplayState` uses `Map`s — clone/serialize carefully if you mirror across boundaries.
 - Growing `limit` refetch gets more expensive on very long threads; virtualize the list when you exceed one window.
 - Missing `threadGeneration` will cause the most visible consistency bugs (wrong thread’s history landing after a fast switch).
+- Feature-complete UI is large; ship Phase A–B before polish so runs never wedge on missing HITL.
+- Factory is an incomplete map of the client — do not treat “Factory doesn’t show X” as “X is optional.”
 
-## 14. Summary
+## 15. Summary
 
-Use **React Query for durable newest-N history**, **MobX for live transcript + connection**, and a disciplined **`mergeWindow`** so refresh, streaming, reconnect, and load-older all converge on one timeline. Prefer **`message_*` for bubbles** and **`display_state_changed` for chrome**. Assume **SSE never replays** — every reconnect must refetch and merge.
+Use **React Query for durable reads**, **MobX for live transcript + display state + connection**, and a disciplined **`mergeWindow`** so refresh, streaming, reconnect, and load-older converge.
+
+For **feature completeness**, expose every `@mastra/client-js` Agent Controller method through stores/actions, bind the full display-state snapshot for chrome/running work, handle every known SSE event in one applicator, and always re-hydrate with `state()` + `listMessages` after reconnect. Prefer **`message_*` for bubbles** and **`display_state_changed` for chrome/tasks/HITL/subagents**. Treat Factory as inspiration, not the ceiling.
